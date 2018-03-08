@@ -31,5 +31,5 @@ class LoadData:
         :return:
         """
         tr = pd.read_sql_query(query, self.con, params=params)
-        df = tr.copy()
+        return tr
 

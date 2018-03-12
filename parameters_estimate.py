@@ -20,10 +20,10 @@ class ParametersEstimate:
         self.num_of_patients = len(model.patients_adversary_events.keys())
         self.phi = np.zeros(self.num_of_patients)
         self.param_vec = np.append(self.phi, self.beta)
-        self.y = model.patients_adversary_events_matrix
-        self.y_sum = self.y.sum(axis=1)
-        self.x = model.patients_under_treat_matrix
-        self.x_y = np.trace(self.y.transpose()@self.x)  # Frobenius inner product
+        self.y = model.patients_adversary_events
+        self.y_sum = np.array([y.sum() for y in self.y.values()])
+        self.x = model.patients_under_treat
+        self.x_y = sum([(self.x[key] * self.y[key]).sum() for key in self.x])
 
     def obj_func(self, param_vec):
         """
@@ -40,10 +40,14 @@ class ParametersEstimate:
         beta = param_vec[-1:].item()
 
         e_phi = np.exp(phi)
-        inner_exp = np.exp(self.x * beta).sum(axis=1)
-        exp_part = (inner_exp * e_phi).sum()
 
-        linear_part_a = self.y.sum(axis=1).dot(phi)
+        inner_exp = []
+        for x in self.x.values():
+            inner_exp.append(np.exp(x*beta).sum())
+        inner_exp = np.array(inner_exp)
+        exp_part = inner_exp.dot(e_phi)
+
+        linear_part_a = self.y_sum.dot(phi)
         linear_part_b = self.x_y*beta
         linear_part = linear_part_a + linear_part_b
 
@@ -57,7 +61,7 @@ class ParametersEstimate:
 
         .. math::
 
-            \\frac{ \\partial{l}}{\\partial{\phi_{i}}} &=& \sum_{d=1}^{\\tau_{i}}
+            \\frac{ \\partial{l}}{\\partial{\phi_{i}}} = \sum_{d=1}^{\\tau_{i}}
             [e^{\phi_{i}+ \\beta x_{id}} - y_{id}]
 
             \\frac{ \\partial{l}}{\\partial{\\beta}} = \sum_{i=1}^{n} \sum_{d=1}^{\\tau_{i}}
@@ -73,16 +77,23 @@ class ParametersEstimate:
         e_phi = np.exp(phi)
 
         # phi gradient
-        phi_inner_exp = np.exp(self.x * beta).sum(axis=1)
-        exp_part = phi_inner_exp * e_phi
+        phi_inner_exp = []
+        for x in self.x.values():
+            phi_inner_exp.append(np.exp(x*beta).sum())
+        phi_inner_exp = np.array(phi_inner_exp)
+        phi_exp_part = phi_inner_exp * e_phi
 
-        phi_grad = exp_part - self.y_sum
+        phi_grad = phi_exp_part - self.y_sum
 
         # beta gradient
-        beta_inner_exp = (np.exp(self.x*beta)*self.x).sum(axis=1)
-        exp_part = (beta_inner_exp * e_phi).sum()
+        beta_inner_exp = []
+        for x in self.x.values():
+            beta_inner_exp.append((np.exp(x * beta) * x).sum())
+        beta_inner_exp = np.array(beta_inner_exp)
 
-        beta_grad = exp_part - self.x_y
+        beta_exp_part = beta_inner_exp.dot(e_phi)
+
+        beta_grad = beta_exp_part - self.x_y
 
         res = np.append(phi_grad, beta_grad)
         return res

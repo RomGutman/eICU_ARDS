@@ -17,6 +17,7 @@ class Model:
         self._TIME_FRAME = 12 * 60  # the time frame in the model from hours to minutes
         # The ratio of the ARDS, in format of "name" -> [High, Low)
         self._adverse_ratio = {
+            'Normal': (np.float('inf'), 0),
             'Mild': (300, 200),
             'Moderate': (200, 100),
             'Severe': (100, 0)
@@ -28,6 +29,7 @@ class Model:
         self.patients_under_treat_matrix = None  # type: np.ndarray
         self.patients_adversary_events_matrix = None  # type: np.ndarray
         self.patients_data = defaultdict(pd.DataFrame)  # type: defaultdict(int, pd.DataFrame)
+        self.outliers = []
 
     @property
     def time_frame(self):
@@ -43,7 +45,7 @@ class Model:
 
     @model_type.setter
     def model_type(self, value):
-        if value not in ["positive","negative"]:
+        if value not in ["positive", "negative", *list(self._adverse_ratio.keys()), "total"]:
             raise ValueError("model type `{}` isn't valid. use \"positive\" or \"negative\" instead. ".format(value))
         self._model_type = value
 
@@ -103,14 +105,13 @@ class Model:
         self.patients_under_treat[patient_id] = df_x_patient.x.values
         return
 
-    def calculate_patient_adv_events(self, max_time, min_time, labels, patient_id, adv_type=1):
+    def calculate_patient_adv_events(self, max_time, min_time, labels, patient_id):
         """
 
         :param max_time:
         :param min_time:
         :param labels:
         :param patient_id:
-        :param adv_type:
         :return:
         """
         df_patient = self.patients_data.get(patient_id)
@@ -135,6 +136,13 @@ class Model:
             adv_mask = "df_pf_diff[\"result\"] > 0"
         elif self._model_type == "negative":
             adv_mask = "df_pf_diff[\"result\"] <= 0"
+        elif self._model_type in self._adverse_ratio.keys():
+            max_val, min_val = self._adverse_ratio[self._model_type]
+            df_pf_diff[self._model_type] = ((df_pf_diff['PF ratio'] > min_val) & (df_pf_diff['PF ratio'] <= max_val))
+            adv_mask = "df_pf_diff[\"{}\"]".format(self._model_type)
+        elif self._model_type == "total":
+            df_pf_diff[self._model_type] = True
+            adv_mask = "df_pf_diff[\"{}\"]".format(self._model_type)
         df_temp_y = pd.DataFrame(df_pf_diff['strata'][eval(adv_mask)].copy().value_counts().reset_index())
         df_temp_y.columns = ['strata', 'y']
 
@@ -179,32 +187,45 @@ class Model:
             print("Start calculating values for patient:{}".format(patient.item()))
             self.calculate_patient_vectors(patient.item())
         print("Finished Calculating values")
-        self.create_matrix()
+        # self.create_matrix()
+
+    def calculate_outliers(self):
+        for patient_id in self.patients_under_treat.keys():
+            for idx, val in enumerate(self.patients_under_treat[patient_id]):
+                if val > 0:
+                    if self.patients_adversary_events[patient_id][idx] == 0:
+                        self.outliers.append(patient_id)
+        print(self.outliers)
 
 
 def main():
     model = Model()
-    # model.calculate_patient_vectors(patient_id=418469)
-    # model.create_matrix()
-    print("Start estimating for 12H time frame")
-    estimate_model(model)
-    model.model_type = "negative"
-    estimate_model(model)
-    print("Start estimating for 24H time frame")
-    model.time_frame = 24
-    model.model_type = "positive"
-    estimate_model(model)
-    model.model_type = "negative"
-    estimate_model(model)
+    time_frames = [12, 24]
+    model_types = ['positive', 'negative', 'Normal', 'Mild', 'Moderate', 'Severe', 'total']
+    estimate_model(model=model, time_frames=time_frames, model_types=model_types)
     keys = np.array(list(model.patients_under_treat.keys()))
     pickle.dump(keys, open('keys.pkl', 'wb'))
+    model.calculate_outliers()
 
 
-def estimate_model(model):
-    model.create_model()
-    parameters_estimate = ParametersEstimate(model)
-    res = parameters_estimate.estimate()
-    print(res.x)
+def estimate_model(model, time_frames, model_types):
+    """
+
+    :param Model model: the ARDS model
+    :param list[int] time_frames: list of time frames to check (int)
+    :param list[str] model_types: the type of test to check
+    :return:
+    """
+    for time_frame in time_frames:
+        print("Start estimating for {}H time frame".format(time_frame))
+        for model_type in model_types:
+            print("Estimating for model: {}".format(model_type))
+            model.time_frame = time_frame
+            model.model_type = model_type
+            model.create_model()
+            parameters_estimate = ParametersEstimate(model)
+            res = parameters_estimate.estimate()
+            print(res.x)
 
 
 if __name__ == '__main__':

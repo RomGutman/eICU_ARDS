@@ -18,11 +18,24 @@ SELECT
   ,%(phsid)s AS phsid
 FROM 
 (SELECT
-    patientunitstayid AS pid
-    ,CASE
-   WHEN labresult IS NOT NULL THEN labresult/100
-   WHEN labresult IS NULL AND nullif(labresulttext,'') IS NOT NULL THEN replace(labresulttext,'%%','')::FLOAT/100
-  END AS res
+      patientunitstayid AS pid
+     ,CASE
+        WHEN labresult IS NOT NULL THEN
+          CASE
+            WHEN labresult <= 1 THEN labresult
+            WHEN labresult = 2 THEN 0.28
+            WHEN labresult = 12 THEN 0.6
+            WHEN labresult = 10 THEN 0.7
+            WHEN labresult = 6 THEN 0.44
+            ELSE labresult/100
+          END
+        WHEN labresult IS NULL AND nullif(labresulttext,'') IS NOT NULL THEN
+          CASE
+            WHEN replace(labresulttext,'%%','')::FLOAT = 2 THEN 0.28
+            ELSE replace(labresulttext,'%%','')::FLOAT/100
+          END
+        ELSE NULL
+      END AS res
     ,labresultoffset AS lab_time
  FROM
     eicu_crd.lab
@@ -32,7 +45,11 @@ FROM
     AND labname = 'FiO2') AS fi
  ,(SELECT 
     patientunitstayid AS pid
-    ,labresult AS res
+    ,CASE
+      WHEN labresult IS NOT NULL THEN labresult
+      WHEN labresult IS NULL AND labresulttext IS NOT NULL THEN replace(labresulttext,'<','')::NUMERIC
+      ELSE NULL
+    END AS res
     ,labresultoffset AS lab_time
   FROM
     eicu_crd.lab
@@ -42,7 +59,7 @@ FROM
     AND labname = 'paO2') AS pa
 WHERE pa.lab_time = fi.lab_time
 AND pa.pid = fi.pid
-and fi.res is not NULL
+AND fi.res IS NOT NULL
 ORDER BY pa.lab_time"""
 
 

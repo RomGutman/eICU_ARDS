@@ -14,7 +14,10 @@ class Model:
     """
 
     def __init__(self, model_type="positive"):
-        self._TIME_FRAME = 12 * 60  # the time frame in the model from hours to minutes
+        self._HOUR = 60
+        self._TIME_FRAME = 12 * self._HOUR  # the time frame in the model from hours to minutes
+        self._DEFAULT_TOLERANCE = 48 * self._HOUR   # the default time frame tolerance for naive model (mostly after)
+        self._BEFORE_TOLERANCE = 24 * self._HOUR    # the default time frame tolerance for before the treatment
         # The ratio of the ARDS, in format of "name" -> [High, Low)
         self._adverse_ratio = {
             'Normal': (np.float('inf'), 0),
@@ -25,6 +28,7 @@ class Model:
         self._model_type = model_type
         self.patients_under_treat = defaultdict(np.ndarray)  # type: defaultdict(int,np.ndarray[int])
         self.patients_adversary_events = defaultdict(np.ndarray)  # type: defaultdict(int, np.ndarray[int])
+        self.patients_naive_vector = defaultdict(np.ndarray)  # type: defaultdict(int, np.ndarray[float])
         self.load_data = LoadData()
         self.patients_under_treat_matrix = None  # type: np.ndarray
         self.patients_adversary_events_matrix = None  # type: np.ndarray
@@ -32,12 +36,28 @@ class Model:
         self.outliers = []
 
     @property
+    def default_tolerance(self):
+        return self._DEFAULT_TOLERANCE
+
+    @default_tolerance.setter
+    def default_tolerance(self, value):
+        self._DEFAULT_TOLERANCE = value * self._HOUR
+
+    @property
+    def before_tolerance(self):
+        return self._BEFORE_TOLERANCE
+
+    @before_tolerance.setter
+    def before_tolerance(self, value):
+        self._BEFORE_TOLERANCE = value * self._HOUR
+
+    @property
     def time_frame(self):
-        return self._TIME_FRAME/60
+        return self._TIME_FRAME/self._HOUR
 
     @time_frame.setter
     def time_frame(self, value):
-        self._TIME_FRAME = value*60
+        self._TIME_FRAME = value * self._HOUR
 
     @property
     def model_type(self):
@@ -75,6 +95,7 @@ class Model:
         tr = self.load_data.query_db(prone_change_queries.query, params=param)
         tr2 = self.load_data.query_db(prone_change_queries.patients_query, params=param)
         self.patients_data[patient_id] = tr.merge(tr2, how='left', on=['phsid']).copy()
+        return tr, tr2
 
     def calculate_patient_under_treat(self, max_time, min_time, labels, patient_id):
         """
@@ -153,6 +174,7 @@ class Model:
     def calculate_patient_vectors(self, patient_id):
         """
 
+        :param patient_id:
         :return:
         """
         self.query_patient_data(patient_id)
@@ -160,6 +182,11 @@ class Model:
         if df_patient.empty:
             print("Patient {}, does not have records!".format(patient_id))
             return
+        df_outliers = df_patient[df_patient["PF ratio"] > 550][["phsid", "lab_time"]]
+        if not df_outliers.empty:
+            self.outliers.append(df_outliers)
+            df_patient = df_patient[~(df_patient["PF ratio"] > 600)].reset_index(drop=True)
+            self.patients_data[patient_id] = df_patient
         max_time = np.max([df_patient['lab_time'].max(), df_patient['toffset'].max()])
         min_time = np.min([df_patient['lab_time'].min(), df_patient['toffset'].min()])
 
@@ -175,17 +202,21 @@ class Model:
         self.calculate_patient_under_treat(max_time, min_time, labels, patient_id)
         self.calculate_patient_adv_events(max_time, min_time, labels, patient_id)
 
-    def create_model(self):
+    def create_model(self, method='SCCS'):
         """
         this method creates the model, by calculating all the patients vectors and than convert it all to a matrix
 
+        :param method:
         :return:
         """
         df_patient = self.load_data.query_db(prone_change_queries.all_patiens_query, params=None)
         patient_list = df_patient.values  # type: np.ndarray[int]
         for patient in patient_list:
             print("Start calculating values for patient:{}".format(patient.item()))
-            self.calculate_patient_vectors(patient.item())
+            if method == 'SCCS':
+                self.calculate_patient_vectors(patient.item())
+            elif method == 'naive':
+                self.calculate_naive_diff(patient.item())
         print("Finished Calculating values")
         # self.create_matrix()
 
@@ -197,14 +228,42 @@ class Model:
                         self.outliers.append(patient_id)
         print(self.outliers)
 
+    def calculate_naive_diff(self, patient_id):
+        tr, tr2 = self.query_patient_data(patient_id)
+        if tr.empty or tr2.empty:
+            print("Patient {}, does not have records!".format(patient_id))
+            return
+        tr.sort_values('lab_time', inplace=True)
+        tr2.sort_values('toffset', inplace=True)
+        # before
+        df2 = pd.merge_asof(tr2[['toffset']], tr[['lab_time', 'PF ratio']], right_on='lab_time', left_on='toffset',
+                            direction='backward', tolerance=24 * 60)    # type: pd.DataFrame
+        df2.rename(columns={"PF ratio": "Before"}, inplace=True)
+        df2['time_before'] = ((df2['toffset'] - df2['lab_time']) / 60).astype(float)
+
+        df4 = pd.merge_asof(tr2[['toffset']], tr[['lab_time', 'PF ratio']], right_on=['lab_time'], left_on='toffset',
+                            direction='forward', tolerance=48 * 60)     # type: pd.DataFrame
+        df4.rename(columns={"PF ratio": "After"}, inplace=True)
+        df4['time_after'] = ((df4['lab_time'] - df4['toffset']) / 60).astype(float)
+        df7 = pd.merge(df2[['toffset', 'Before', 'time_before']], df4[['toffset', 'After', 'time_after']],
+                       on='toffset').copy()
+        df7['diff'] = df7['toffset'].diff()
+        df7 = df7[~(df7['After'].isnull()) & ~(df7['Before'].isnull())]
+        df7 = df7[(df7['diff'] > 2 * 60) | (df7['diff'].isnull())].reset_index(drop=True)
+        df7['pf delta'] = (df7['After'] / df7['Before']).astype(float)
+        self.patients_naive_vector[patient_id] = df7['pf delta'].values
+
 
 def main():
     model = Model()
     time_frames = [12, 24]
     model_types = ['positive', 'negative', 'Normal', 'Mild', 'Moderate', 'Severe', 'total']
-    estimate_model(model=model, time_frames=time_frames, model_types=model_types)
+    # estimate_model(model=model, time_frames=time_frames, model_types=model_types)
+    model.create_model('naive')
     keys = np.array(list(model.patients_under_treat.keys()))
     pickle.dump(keys, open('keys.pkl', 'wb'))
+    res = model.patients_naive_vector
+    pickle.dump(res, open('naive_vecs.pkl', 'wb'))
     model.calculate_outliers()
 
 
